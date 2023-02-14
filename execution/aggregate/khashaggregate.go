@@ -76,20 +76,26 @@ func NewKHashAggregate(
 	return a, nil
 }
 
-func (a *kAggregate) Next(ctx context.Context) ([]model.StepVector, error) {
-	in, err := a.next.Next(ctx)
+func (a *kAggregate) Next(ctx context.Context) ([]model.StepVector, int64, error) {
+	var currSamples int64 = 0
+
+	in, samples, err := a.next.Next(ctx)
+	currSamples += samples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 	if in == nil {
-		return nil, nil
+		return nil, currSamples, nil
 	}
 
 	defer a.next.GetPool().PutVectors(in)
 
-	args, err := a.paramOp.Next(ctx)
+	args, opSamples, err := a.paramOp.Next(ctx)
+	currSamples += opSamples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 	for i := range a.params {
 		a.params[i] = math.NaN()
@@ -101,12 +107,12 @@ func (a *kAggregate) Next(ctx context.Context) ([]model.StepVector, error) {
 	a.paramOp.GetPool().PutVectors(args)
 
 	if len(args) < len(in) {
-		return nil, errors.New("scalar argument not found")
+		return nil, currSamples, errors.New("scalar argument not found")
 	}
 
 	a.once.Do(func() { err = a.init(ctx) })
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
 	result := a.vectorPool.GetVectorBatch()
@@ -115,7 +121,7 @@ func (a *kAggregate) Next(ctx context.Context) ([]model.StepVector, error) {
 		a.next.GetPool().PutStepVector(vector)
 	}
 
-	return result, nil
+	return result, currSamples, nil
 }
 
 func (a *kAggregate) Series(ctx context.Context) ([]labels.Labels, error) {

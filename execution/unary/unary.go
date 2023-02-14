@@ -67,23 +67,23 @@ func (u *unaryNegation) GetPool() *model.VectorPool {
 	return u.next.GetPool()
 }
 
-func (u *unaryNegation) Next(ctx context.Context) ([]model.StepVector, error) {
+func (u *unaryNegation) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
-	in, err := u.next.Next(ctx)
+	in, samples, err := u.next.Next(ctx)
 	if err != nil {
-		return nil, err
+		return nil, samples, err
 	}
 	if in == nil {
-		return nil, nil
+		return nil, samples, nil
 	}
 	for i, vector := range in {
 		if err := u.workers[i].Send(0, vector); err != nil {
-			return nil, err
+			return nil, samples, err
 		}
 	}
 
@@ -91,11 +91,11 @@ func (u *unaryNegation) Next(ctx context.Context) ([]model.StepVector, error) {
 		// Make sure worker finishes the job.
 		// Since it is in-place so no need another buffer.
 		if _, err := u.workers[i].GetOutput(); err != nil {
-			return nil, err
+			return nil, samples, err
 		}
 	}
 
-	return in, nil
+	return in, samples, nil
 }
 
 func (u *unaryNegation) workerTask(_ int, _ float64, vector model.StepVector) model.StepVector {

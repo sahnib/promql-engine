@@ -154,32 +154,52 @@ func (o *vectorOperator) initOutputs(ctx context.Context) error {
 	return nil
 }
 
-func (o *vectorOperator) Next(ctx context.Context) ([]model.StepVector, error) {
+func (o *vectorOperator) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
-	lhs, err := o.lhs.Next(ctx)
+	var currSamples int64 = 0
+	lhs, lhsSamples, err := o.lhs.Next(ctx)
+	currSamples += lhsSamples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
-	rhs, err := o.rhs.Next(ctx)
+	rhs, rhsSamples, err := o.rhs.Next(ctx)
+	currSamples += rhsSamples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
 	// TODO(fpetkovski): When one operator becomes empty,
 	// we might want to drain or close the other one.
 	// We don't have a concept of closing an operator yet.
 	if len(lhs) == 0 || len(rhs) == 0 {
-		return nil, nil
+		for len(rhs) != 0 {
+			rhs, rhsSamples, err = o.rhs.Next(ctx)
+			currSamples += rhsSamples
+			if err != nil {
+				break
+			}
+		}
+
+		for len(lhs) != 0 {
+			lhs, lhsSamples, err = o.lhs.Next(ctx)
+			currSamples += lhsSamples
+			if err != nil {
+				break
+			}
+		}
+		return nil, currSamples, nil
 	}
 
 	o.once.Do(func() { err = o.initOutputs(ctx) })
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
 	batch := o.pool.GetVectorBatch()
@@ -204,14 +224,14 @@ func (o *vectorOperator) Next(ctx context.Context) ([]model.StepVector, error) {
 			group := sampleID.MatchLabels(o.matching.On, o.matching.MatchingLabels...)
 			msg := "found duplicate series for the match group %s on the %s hand-side of the operation: [%s, %s]" +
 				";many-to-many matching not allowed: matching labels must be unique on one side"
-			return nil, errors.Newf(msg, group, err.side, sampleID.String(), duplicateSampleID.String())
+			return nil, currSamples, errors.Newf(msg, group, err.side, sampleID.String(), duplicateSampleID.String())
 		}
 		o.lhs.GetPool().PutStepVector(vector)
 	}
 	o.lhs.GetPool().PutVectors(lhs)
 	o.rhs.GetPool().PutVectors(rhs)
 
-	return batch, nil
+	return batch, currSamples, nil
 }
 
 func (o *vectorOperator) GetPool() *model.VectorPool {

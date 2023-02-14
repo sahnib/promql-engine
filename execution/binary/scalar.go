@@ -91,28 +91,33 @@ func (o *scalarOperator) Series(ctx context.Context) ([]labels.Labels, error) {
 	return o.series, nil
 }
 
-func (o *scalarOperator) Next(ctx context.Context) ([]model.StepVector, error) {
+func (o *scalarOperator) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
-	in, err := o.next.Next(ctx)
+	var currSamples int64 = 0
+	in, samples, err := o.next.Next(ctx)
+	currSamples += samples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 	if in == nil {
-		return nil, nil
+		return nil, currSamples, nil
 	}
 	o.seriesOnce.Do(func() { err = o.loadSeries(ctx) })
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
-	scalarIn, err := o.scalar.Next(ctx)
+	scalarIn, scalarSamples, err := o.scalar.Next(ctx)
+	currSamples += scalarSamples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
 	out := o.pool.GetVectorBatch()
@@ -149,7 +154,7 @@ func (o *scalarOperator) Next(ctx context.Context) ([]model.StepVector, error) {
 	o.next.GetPool().PutVectors(in)
 	o.scalar.GetPool().PutVectors(scalarIn)
 
-	return out, nil
+	return out, currSamples, nil
 }
 
 func (o *scalarOperator) GetPool() *model.VectorPool {

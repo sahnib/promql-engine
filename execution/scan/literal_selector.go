@@ -54,15 +54,15 @@ func (o *numberLiteralSelector) GetPool() *model.VectorPool {
 	return o.vectorPool
 }
 
-func (o *numberLiteralSelector) Next(ctx context.Context) ([]model.StepVector, error) {
+func (o *numberLiteralSelector) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
 	if o.currentStep > o.maxt {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	o.loadSeries()
@@ -85,7 +85,7 @@ func (o *numberLiteralSelector) Next(ctx context.Context) ([]model.StepVector, e
 	}
 	o.currentStep += o.step * int64(o.numSteps)
 
-	return vectors, nil
+	return vectors, 0, nil
 }
 
 func (o *numberLiteralSelector) loadSeries() {

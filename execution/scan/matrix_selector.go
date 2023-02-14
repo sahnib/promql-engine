@@ -6,8 +6,10 @@ package scan
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/prometheus/util/stats"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -50,6 +52,8 @@ type matrixSelector struct {
 
 	shard     int
 	numShards int
+
+	querySamples *stats.QuerySamples
 }
 
 // NewMatrixSelector creates operator which selects vector of series over time.
@@ -61,6 +65,7 @@ func NewMatrixSelector(
 	opts *query.Options,
 	selectRange, offset time.Duration,
 	shard, numShard int,
+	querySamples *stats.QuerySamples,
 ) model.VectorOperator {
 	// TODO(fpetkovski): Add offset parameter.
 	return &matrixSelector{
@@ -80,6 +85,8 @@ func NewMatrixSelector(
 
 		shard:     shard,
 		numShards: numShard,
+
+		querySamples: querySamples,
 	}
 }
 
@@ -102,23 +109,24 @@ func (o *matrixSelector) GetPool() *model.VectorPool {
 	return o.vectorPool
 }
 
-func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
+func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
 	if o.currentStep > o.maxt {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	if err := o.loadSeries(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	vectors := o.vectorPool.GetVectorBatch()
 	ts := o.currentStep
+	var currSamples int64 = 0
 	for i := 0; i < len(o.scanners); i++ {
 		var (
 			series   = o.scanners[i]
@@ -131,9 +139,9 @@ func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 			}
 			maxt := seriesTs - o.offset
 			mint := maxt - o.selectRange
-			rangePoints, err := selectPoints(series.samples, mint, maxt, o.scanners[i].previousPoints)
+			rangePoints, samples, err := selectPoints(series.samples, mint, maxt, o.scanners[i].previousPoints)
 			if err != nil {
-				return nil, err
+				return nil, currSamples, err
 			}
 
 			// TODO(saswatamcode): Handle multi-arg functions for matrixSelectors.
@@ -148,6 +156,7 @@ func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 				Offset:      o.offset,
 			})
 
+			currSamples += samples
 			if result.Point != function.InvalidSample.Point {
 				vectors[currStep].T = result.T
 				if result.H != nil {
@@ -176,7 +185,9 @@ func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 	}
 	o.currentStep += o.step * int64(o.numSteps)
 
-	return vectors, nil
+	atomic.AddInt64(&o.querySamples.TotalSamples, currSamples)
+
+	return vectors, currSamples, nil
 }
 
 func (o *matrixSelector) loadSeries(ctx context.Context) error {
@@ -224,7 +235,8 @@ func (o *matrixSelector) loadSeries(ctx context.Context) error {
 // into the [mint, maxt] range are retained; only points with later timestamps
 // are populated from the iterator.
 // TODO(fpetkovski): Add max samples limit.
-func selectPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []promql.Point) ([]promql.Point, error) {
+func selectPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []promql.Point) ([]promql.Point, int64, error) {
+	var currSamples int64 = 0
 	if len(out) > 0 && out[len(out)-1].T >= mint {
 		// There is an overlap between previous and current ranges, retain common
 		// points. In most such cases:
@@ -235,6 +247,15 @@ func selectPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []pr
 		for drop = 0; out[drop].T < mint; drop++ {
 		}
 		copy(out, out[drop:])
+
+		for i := drop; i < len(out); i++ {
+			p := out[i]
+			if p.H != nil {
+				currSamples += int64(len(p.H.NegativeBuckets) + len(p.H.PositiveBuckets))
+			} else {
+				currSamples += 1
+			}
+		}
 		out = out[:len(out)-drop]
 		// Only append points with timestamps after the last timestamp we have.
 		mint = out[len(out)-1].T + 1
@@ -245,21 +266,23 @@ func selectPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []pr
 	soughtValueType := it.Seek(maxt)
 	if soughtValueType == chunkenc.ValNone {
 		if it.Err() != nil {
-			return nil, it.Err()
+			return nil, 0, it.Err()
 		}
 	}
 
 	buf := it.Buffer()
+
 loop:
 	for {
 		switch buf.Next() {
 		case chunkenc.ValNone:
 			break loop
 		case chunkenc.ValFloatHistogram:
-			return out, ErrNativeHistogramsUnsupported
+			return out, 0, ErrNativeHistogramsUnsupported
 		case chunkenc.ValHistogram:
 			t, h := buf.AtHistogram()
 			if t >= mint {
+				currSamples += int64(len(h.PositiveBuckets) + len(h.NegativeBuckets))
 				out = append(out, promql.Point{T: t, H: h.ToFloat()})
 			}
 		case chunkenc.ValFloat:
@@ -269,6 +292,7 @@ loop:
 			}
 			// Values in the buffer are guaranteed to be smaller than maxt.
 			if t >= mint {
+				currSamples += 1
 				out = append(out, promql.Point{T: t, V: v})
 			}
 		}
@@ -277,18 +301,20 @@ loop:
 	// The sought sample might also be in the range.
 	switch soughtValueType {
 	case chunkenc.ValFloatHistogram:
-		return out, ErrNativeHistogramsUnsupported
+		return out, 0, ErrNativeHistogramsUnsupported
 	case chunkenc.ValHistogram:
 		t, h := it.AtHistogram()
 		if t == maxt {
+			currSamples = int64(len(h.PositiveBuckets) + len(h.NegativeBuckets))
 			out = append(out, promql.Point{T: t, H: h.ToFloat()})
 		}
 	case chunkenc.ValFloat:
 		t, v := it.At()
 		if t == maxt && !value.IsStaleNaN(v) {
+			currSamples += 1
 			out = append(out, promql.Point{T: t, V: v})
 		}
 	}
 
-	return out, nil
+	return out, currSamples, nil
 }

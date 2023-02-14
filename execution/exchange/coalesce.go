@@ -70,26 +70,27 @@ func (c *coalesce) Series(ctx context.Context) ([]labels.Labels, error) {
 	return c.series, nil
 }
 
-func (c *coalesce) Next(ctx context.Context) ([]model.StepVector, error) {
+func (c *coalesce) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
 	var err error
 	c.once.Do(func() { err = c.loadSeries(ctx) })
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
+	var currSamples int64 = 0
 	var errChan = make(errorChan, len(c.operators))
 	for idx, o := range c.operators {
 		c.wg.Add(1)
 		go func(opIdx int, o model.VectorOperator) {
 			defer c.wg.Done()
 
-			in, err := o.Next(ctx)
+			in, samples, err := o.Next(ctx)
 			if err != nil {
 				errChan <- err
 				return
@@ -105,13 +106,15 @@ func (c *coalesce) Next(ctx context.Context) ([]model.StepVector, error) {
 				}
 			}
 			c.inVectors[opIdx] = in
+
+			atomic.AddInt64(&currSamples, samples)
 		}(idx, o)
 	}
 	c.wg.Wait()
 	close(errChan)
 
 	if err := errChan.getError(); err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
 	var out []model.StepVector = nil
@@ -133,10 +136,10 @@ func (c *coalesce) Next(ctx context.Context) ([]model.StepVector, error) {
 	}
 
 	if out == nil {
-		return nil, nil
+		return nil, currSamples, nil
 	}
 
-	return out, nil
+	return out, currSamples, nil
 }
 
 func (c *coalesce) loadSeries(ctx context.Context) error {

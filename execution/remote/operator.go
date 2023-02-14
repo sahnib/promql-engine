@@ -6,6 +6,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/prometheus/util/stats"
 	"sync"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -22,10 +23,10 @@ type Execution struct {
 	vectorSelector model.VectorOperator
 }
 
-func NewExecution(query promql.Query, pool *model.VectorPool, opts *query.Options) *Execution {
+func NewExecution(query promql.Query, pool *model.VectorPool, opts *query.Options, querySamples *stats.QuerySamples) *Execution {
 	return &Execution{
 		query:          query,
-		vectorSelector: scan.NewVectorSelector(pool, newStorageFromQuery(query), opts, 0, 0, 1),
+		vectorSelector: scan.NewVectorSelector(pool, newStorageFromQuery(query), opts, 0, 0, 1, querySamples),
 	}
 }
 
@@ -33,7 +34,7 @@ func (e *Execution) Series(ctx context.Context) ([]labels.Labels, error) {
 	return e.vectorSelector.Series(ctx)
 }
 
-func (e *Execution) Next(ctx context.Context) ([]model.StepVector, error) {
+func (e *Execution) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	return e.vectorSelector.Next(ctx)
 }
 

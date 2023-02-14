@@ -6,7 +6,9 @@ package scan
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/prometheus/util/stats"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/efficientgo/core/errors"
@@ -49,6 +51,8 @@ type vectorSelector struct {
 
 	shard     int
 	numShards int
+
+	querySamples *stats.QuerySamples
 }
 
 // NewVectorSelector creates operator which selects vector of series.
@@ -58,6 +62,7 @@ func NewVectorSelector(
 	queryOpts *query.Options,
 	offset time.Duration,
 	shard, numShards int,
+	querySamples *stats.QuerySamples,
 ) model.VectorOperator {
 	return &vectorSelector{
 		storage:    selector,
@@ -73,11 +78,13 @@ func NewVectorSelector(
 
 		shard:     shard,
 		numShards: numShards,
+
+		querySamples: querySamples,
 	}
 }
 
 func (o *vectorSelector) Explain() (me string, next []model.VectorOperator) {
-	return fmt.Sprintf("[*vectorSelector] {%v} %v mod %v", o.storage.Matchers(), o.shard, o.numShards), nil
+	return fmt.Sprintf("[*vectorSelector %p] {%v} %v mod %v", o, o.storage.Matchers(), o.shard, o.numShards), nil
 }
 
 func (o *vectorSelector) Series(ctx context.Context) ([]labels.Labels, error) {
@@ -91,23 +98,24 @@ func (o *vectorSelector) GetPool() *model.VectorPool {
 	return o.vectorPool
 }
 
-func (o *vectorSelector) Next(ctx context.Context) ([]model.StepVector, error) {
+func (o *vectorSelector) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
 	if o.currentStep > o.maxt {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	if err := o.loadSeries(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	vectors := o.vectorPool.GetVectorBatch()
 	ts := o.currentStep
+	var currentSamples int64 = 0
 	for i := 0; i < len(o.scanners); i++ {
 		var (
 			series   = o.scanners[i]
@@ -120,12 +128,14 @@ func (o *vectorSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 			}
 			_, v, h, ok, err := selectPoint(series.samples, seriesTs, o.lookbackDelta, o.offset)
 			if err != nil {
-				return nil, err
+				return nil, currentSamples, err
 			}
 			if ok {
 				if h != nil {
+					currentSamples += int64(len(h.PositiveBuckets) + len(h.NegativeBuckets))
 					vectors[currStep].AppendHistogram(o.vectorPool, series.signature, h)
 				} else {
+					currentSamples += 1
 					vectors[currStep].AppendSample(o.vectorPool, series.signature, v)
 				}
 			}
@@ -139,7 +149,9 @@ func (o *vectorSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 	}
 	o.currentStep += o.step * int64(o.numSteps)
 
-	return vectors, nil
+	atomic.AddInt64(&o.querySamples.TotalSamples, currentSamples)
+
+	return vectors, currentSamples, nil
 }
 
 func (o *vectorSelector) loadSeries(ctx context.Context) error {

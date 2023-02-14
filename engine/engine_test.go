@@ -74,6 +74,7 @@ func TestVectorSelectorWithGaps(t *testing.T) {
 	testutil.Ok(t, oldResult.Err)
 
 	testutil.Equals(t, oldResult, newResult)
+	testutil.Equals(t, q1.Stats().Samples.TotalSamples, q2.Stats().Samples.TotalSamples)
 
 }
 
@@ -1536,6 +1537,7 @@ func TestQueriesAgainstOldEngine(t *testing.T) {
 									EngineOpts:        opts,
 									DisableFallback:   disableFallback,
 									LogicalOptimizers: optimizers,
+									DebugWriter:       os.Stdout,
 								})
 								q1, err := newEngine.NewRangeQuery(test.Storage(), nil, tc.query, tc.start, tc.end, tc.step)
 								testutil.Ok(t, err)
@@ -1551,6 +1553,7 @@ func TestQueriesAgainstOldEngine(t *testing.T) {
 								oldResult := q2.Exec(context.Background())
 								if oldResult.Err == nil {
 									testutil.Ok(t, newResult.Err)
+									testutil.Equals(t, q1.Stats().Samples.TotalSamples, q2.Stats().Samples.TotalSamples)
 									if hasNaNs(oldResult) {
 										t.Log("Applying comparison with NaN equality.")
 										testutil.WithGoCmp(cmpopts.EquateNaNs()).Equals(t, oldResult, newResult)
@@ -1754,6 +1757,7 @@ func TestBinopEdgeCases(t *testing.T) {
 
 	newResult := q2.Exec(ctx)
 	testutil.Equals(t, oldResult, newResult)
+	testutil.Equals(t, q1.Stats().Samples.TotalSamples, q2.Stats().Samples.TotalSamples)
 }
 
 func TestInstantQuery(t *testing.T) {
@@ -2462,6 +2466,7 @@ func TestInstantQuery(t *testing.T) {
 									EngineOpts:        opts,
 									DisableFallback:   disableFallback,
 									LogicalOptimizers: optimizers,
+									DebugWriter:       os.Stdout,
 								})
 
 								q1, err := newEngine.NewInstantQuery(test.Storage(), nil, tc.query, queryTime)
@@ -2490,6 +2495,7 @@ func TestInstantQuery(t *testing.T) {
 								} else {
 									testutil.Equals(t, oldResult, newResult)
 								}
+								testutil.Equals(t, q1.Stats().Samples.TotalSamples, q2.Stats().Samples.TotalSamples)
 							})
 						}
 					})

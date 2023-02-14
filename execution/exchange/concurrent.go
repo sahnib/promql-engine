@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/thanos-community/promql-engine/execution/model"
 
@@ -45,30 +46,31 @@ func (c *concurrencyOperator) GetPool() *model.VectorPool {
 	return c.next.GetPool()
 }
 
-func (c *concurrencyOperator) Next(ctx context.Context) ([]model.StepVector, error) {
+func (c *concurrencyOperator) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
+	var currSamples int64 = 0
 	c.once.Do(func() {
-		go c.pull(ctx)
+		go c.pull(ctx, &currSamples)
 		go c.drainBufferOnCancel(ctx)
 	})
 
 	r, ok := <-c.buffer
 	if !ok {
-		return nil, nil
+		return nil, currSamples, nil
 	}
 	if r.err != nil {
-		return nil, r.err
+		return nil, currSamples, r.err
 	}
 
-	return r.stepVector, nil
+	return r.stepVector, currSamples, nil
 }
 
-func (c *concurrencyOperator) pull(ctx context.Context) {
+func (c *concurrencyOperator) pull(ctx context.Context, totalSamples *int64) {
 	defer close(c.buffer)
 
 	for {
@@ -77,7 +79,8 @@ func (c *concurrencyOperator) pull(ctx context.Context) {
 			c.buffer <- maybeStepVector{err: ctx.Err()}
 			return
 		default:
-			r, err := c.next.Next(ctx)
+			r, samples, err := c.next.Next(ctx)
+			atomic.AddInt64(totalSamples, samples)
 			if err != nil {
 				c.buffer <- maybeStepVector{err: err}
 				return

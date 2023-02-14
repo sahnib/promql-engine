@@ -58,9 +58,9 @@ func (o *noArgFunctionOperator) GetPool() *model.VectorPool {
 	return o.vectorPool
 }
 
-func (o *noArgFunctionOperator) Next(_ context.Context) ([]model.StepVector, error) {
+func (o *noArgFunctionOperator) Next(_ context.Context) ([]model.StepVector, int64, error) {
 	if o.currentStep > o.maxt {
-		return nil, nil
+		return nil, 0, nil
 	}
 	ret := o.vectorPool.GetVectorBatch()
 	for i := 0; i < o.stepsBatch && o.currentStep <= o.maxt; i++ {
@@ -75,7 +75,7 @@ func (o *noArgFunctionOperator) Next(_ context.Context) ([]model.StepVector, err
 		o.currentStep += o.step
 	}
 
-	return ret, nil
+	return ret, 0, nil
 }
 
 func NewFunctionOperator(funcExpr *parser.Call, call FunctionCall, nextOps []model.VectorOperator, stepsBatch int, opts *query.Options) (model.VectorOperator, error) {
@@ -154,26 +154,29 @@ func (o *functionOperator) GetPool() *model.VectorPool {
 	return o.nextOps[o.vectorIndex].GetPool()
 }
 
-func (o *functionOperator) Next(ctx context.Context) ([]model.StepVector, error) {
+func (o *functionOperator) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
 	if err := o.loadSeries(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
+	var currSamples int64 = 0
 	// Process non-variadic single/multi-arg instant vector and scalar input functions.
 	// Call next on vector input.
-	vectors, err := o.nextOps[o.vectorIndex].Next(ctx)
+	vectors, samples, err := o.nextOps[o.vectorIndex].Next(ctx)
+	currSamples += samples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
 	if len(vectors) == 0 {
-		return nil, nil
+		return nil, currSamples, nil
 	}
 
 	scalarIndex := 0
@@ -182,9 +185,11 @@ func (o *functionOperator) Next(ctx context.Context) ([]model.StepVector, error)
 			continue
 		}
 
-		scalarVectors, err := o.nextOps[i].Next(ctx)
+		scalarVectors, scalarSamples, err := o.nextOps[i].Next(ctx)
+		currSamples += scalarSamples
+
 		if err != nil {
-			return nil, err
+			return nil, currSamples, err
 		}
 
 		for batchIndex := range vectors {
@@ -227,7 +232,7 @@ func (o *functionOperator) Next(ctx context.Context) ([]model.StepVector, error)
 		}
 	}
 
-	return vectors, nil
+	return vectors, currSamples, nil
 }
 
 func (o *functionOperator) loadSeries(ctx context.Context) error {

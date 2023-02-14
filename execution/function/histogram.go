@@ -75,31 +75,36 @@ func (o *histogramOperator) GetPool() *model.VectorPool {
 	return o.pool
 }
 
-func (o *histogramOperator) Next(ctx context.Context) ([]model.StepVector, error) {
+func (o *histogramOperator) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
 	var err error
 	o.once.Do(func() { err = o.loadSeries(ctx) })
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	scalars, err := o.scalarOp.Next(ctx)
+	var currSamples int64 = 0
+	scalars, scalarSamples, err := o.scalarOp.Next(ctx)
+	currSamples += scalarSamples
+
 	if err != nil {
-		return nil, err
+		return nil, currSamples, err
 	}
 
 	if len(scalars) == 0 {
-		return nil, nil
+		return nil, currSamples, nil
 	}
 
-	vectors, err := o.vectorOp.Next(ctx)
+	vectors, vectorSamples, err := o.vectorOp.Next(ctx)
+	currSamples += vectorSamples
+
 	if err != nil {
-		return nil, err
+		return nil, vectorSamples, err
 	}
 
 	o.scalarPoints = o.scalarPoints[:0]
@@ -111,7 +116,9 @@ func (o *histogramOperator) Next(ctx context.Context) ([]model.StepVector, error
 	}
 	o.scalarOp.GetPool().PutVectors(scalars)
 
-	return o.processInputSeries(vectors)
+	out, err := o.processInputSeries(vectors)
+
+	return out, currSamples, err
 }
 
 func (o *histogramOperator) processInputSeries(vectors []model.StepVector) ([]model.StepVector, error) {

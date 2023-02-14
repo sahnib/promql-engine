@@ -5,9 +5,8 @@ package exchange
 
 import (
 	"context"
-	"sync"
-
 	"github.com/prometheus/prometheus/model/labels"
+	"sync"
 
 	"github.com/thanos-community/promql-engine/execution/model"
 )
@@ -43,22 +42,23 @@ func NewDedupOperator(pool *model.VectorPool, next model.VectorOperator) model.V
 	}
 }
 
-func (d *dedupOperator) Next(ctx context.Context) ([]model.StepVector, error) {
+func (d *dedupOperator) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	var err error
 	d.once.Do(func() { err = d.loadSeries(ctx) })
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	in, err := d.next.Next(ctx)
+	in, _, err := d.next.Next(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if in == nil {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	result := d.pool.GetVectorBatch()
+	var currSamples int64 = 0
 	for _, vector := range in {
 		for i, inputSampleID := range vector.SampleIDs {
 			outputSampleID := d.outputIndex[inputSampleID]
@@ -74,12 +74,13 @@ func (d *dedupOperator) Next(ctx context.Context) ([]model.StepVector, error) {
 			// the sample was added in a previous iteration and should be skipped.
 			if sample.t == vector.T {
 				out.AppendSample(d.pool, uint64(outputSampleID), sample.v)
+				currSamples += 1
 			}
 		}
 		result = append(result, out)
 	}
 
-	return result, nil
+	return result, currSamples, nil
 }
 
 func (d *dedupOperator) Series(ctx context.Context) ([]labels.Labels, error) {

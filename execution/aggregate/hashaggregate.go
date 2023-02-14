@@ -100,31 +100,36 @@ func (a *aggregate) GetPool() *model.VectorPool {
 	return a.vectorPool
 }
 
-func (a *aggregate) Next(ctx context.Context) ([]model.StepVector, error) {
+func (a *aggregate) Next(ctx context.Context) ([]model.StepVector, int64, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
-	in, err := a.next.Next(ctx)
+	var currentSamples int64 = 0
+	in, samples, err := a.next.Next(ctx)
+	currentSamples += samples
+
 	if err != nil {
-		return nil, err
+		return nil, currentSamples, err
 	}
 	if in == nil {
-		return nil, nil
+		return nil, currentSamples, nil
 	}
 	defer a.next.GetPool().PutVectors(in)
 
 	a.once.Do(func() { err = a.initializeTables(ctx) })
 	if err != nil {
-		return nil, err
+		return nil, currentSamples, err
 	}
 
 	if a.paramOp != nil {
-		args, err := a.paramOp.Next(ctx)
+		args, opSamples, err := a.paramOp.Next(ctx)
+		currentSamples += opSamples
+
 		if err != nil {
-			return nil, err
+			return nil, currentSamples, err
 		}
 		for i := range a.params {
 			a.params[i] = math.NaN()
@@ -139,20 +144,20 @@ func (a *aggregate) Next(ctx context.Context) ([]model.StepVector, error) {
 	result := a.vectorPool.GetVectorBatch()
 	for i, vector := range in {
 		if err = a.workers[i].Send(a.params[i], vector); err != nil {
-			return nil, err
+			return nil, currentSamples, err
 		}
 	}
 
 	for i, vector := range in {
 		output, err := a.workers[i].GetOutput()
 		if err != nil {
-			return nil, err
+			return nil, currentSamples, err
 		}
 		result = append(result, output)
 		a.next.GetPool().PutStepVector(vector)
 	}
 
-	return result, nil
+	return result, currentSamples, nil
 }
 
 func (a *aggregate) initializeTables(ctx context.Context) error {

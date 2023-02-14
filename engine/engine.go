@@ -168,7 +168,12 @@ func (e *compatibilityEngine) NewInstantQuery(q storage.Queryable, opts *promql.
 	lplan := logicalplan.New(expr, ts, ts)
 	lplan = lplan.Optimize(e.logicalOptimizers)
 
-	exec, err := execution.New(lplan.Expr(), q, ts, ts, 0, e.lookbackDelta)
+	var enablePerStepStats bool
+	if opts != nil {
+		enablePerStepStats = opts.EnablePerStepStats
+	}
+	querySamples := stats.NewQuerySamples(enablePerStepStats)
+	exec, err := execution.New(lplan.Expr(), q, ts, ts, 0, e.lookbackDelta, querySamples)
 	if e.triggerFallback(err) {
 		e.queries.WithLabelValues("true").Inc()
 		return e.prom.NewInstantQuery(q, opts, qs, ts)
@@ -183,12 +188,13 @@ func (e *compatibilityEngine) NewInstantQuery(q storage.Queryable, opts *promql.
 	}
 
 	return &compatibilityQuery{
-		Query:      &Query{exec: exec, opts: opts},
-		engine:     e,
-		expr:       expr,
-		ts:         ts,
-		t:          InstantQuery,
-		resultSort: newResultSort(expr),
+		Query:        &Query{exec: exec, opts: opts},
+		engine:       e,
+		expr:         expr,
+		ts:           ts,
+		t:            InstantQuery,
+		resultSort:   newResultSort(expr),
+		querySamples: querySamples,
 	}, nil
 }
 
@@ -206,7 +212,12 @@ func (e *compatibilityEngine) NewRangeQuery(q storage.Queryable, opts *promql.Qu
 	lplan := logicalplan.New(expr, start, end)
 	lplan = lplan.Optimize(e.logicalOptimizers)
 
-	exec, err := execution.New(lplan.Expr(), q, start, end, step, e.lookbackDelta)
+	var enablePerStepStats bool
+	if opts != nil {
+		enablePerStepStats = opts.EnablePerStepStats
+	}
+	querySamples := stats.NewQuerySamples(enablePerStepStats)
+	exec, err := execution.New(lplan.Expr(), q, start, end, step, e.lookbackDelta, querySamples)
 	if e.triggerFallback(err) {
 		e.queries.WithLabelValues("true").Inc()
 		return e.prom.NewRangeQuery(q, opts, qs, start, end, step)
@@ -225,6 +236,8 @@ func (e *compatibilityEngine) NewRangeQuery(q storage.Queryable, opts *promql.Qu
 		engine: e,
 		expr:   expr,
 		t:      RangeQuery,
+
+		querySamples: querySamples,
 	}, nil
 }
 
@@ -321,6 +334,8 @@ type compatibilityQuery struct {
 	t          QueryType
 	resultSort resultSort
 
+	querySamples *stats.QuerySamples
+
 	cancel context.CancelFunc
 }
 
@@ -351,7 +366,7 @@ loop:
 		case <-ctx.Done():
 			return newErrResult(ret, ctx.Err())
 		default:
-			r, err := q.Query.exec.Next(ctx)
+			r, _, err := q.Query.exec.Next(ctx)
 			if err != nil {
 				return newErrResult(ret, err)
 			}
@@ -472,11 +487,7 @@ func (q *compatibilityQuery) Statement() parser.Statement { return nil }
 
 // Stats always returns empty query stats for now to avoid panic.
 func (q *compatibilityQuery) Stats() *stats.Statistics {
-	var enablePerStepStats bool
-	if q.opts != nil {
-		enablePerStepStats = q.opts.EnablePerStepStats
-	}
-	return &stats.Statistics{Timers: stats.NewQueryTimers(), Samples: stats.NewQuerySamples(enablePerStepStats)}
+	return &stats.Statistics{Timers: stats.NewQueryTimers(), Samples: q.querySamples}
 }
 
 func (q *compatibilityQuery) Close() { q.Cancel() }
